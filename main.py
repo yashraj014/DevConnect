@@ -1,0 +1,36 @@
+from fastapi import FastAPI,Depends,HTTPException,status
+from database import get_db,Base,engine
+from sqlalchemy.orm import Session
+from sqlalchemy import select,or_
+from models.users import User
+from schemas.users import UserCreate,UserResponse
+from core import security
+
+app=FastAPI()
+
+Base.metadata.create_all(bind=engine)
+
+@app.post('/register',response_model=UserResponse,status_code=status.HTTP_201_CREATED)
+def register_user(user:UserCreate,db:Session=Depends(get_db)):
+    
+    result=db.execute(select(User).where(or_(User.username==user.username,User.email==user.email)))
+    existing_user=result.scalars().first()
+    if existing_user:
+        if existing_user.username==user.username:
+         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,detail="username already exists")
+        if existing_user.email==user.email:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,detail="email already registered")
+            
+    
+    hashed_pw=security.get_password_hash(user.password)
+    
+    new_user=User(
+        username=user.username,
+        hashed_password=hashed_pw,
+        email=user.email
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+    
