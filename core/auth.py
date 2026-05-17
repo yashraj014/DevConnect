@@ -6,6 +6,8 @@ from database import get_db
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from models.users import User
+
+# to extract bearer token from the authorization header
 oauth2_scheme = OAuth2PasswordBearer(
     tokenUrl="login"
 )
@@ -24,7 +26,7 @@ def create_access_token(data:dict):
             "exp":expire
         }
     )       
-    
+    # HEADER,PAYLOAD,SIGNATURE
     encoded_jwt=jwt.encode(
         to_encode,
         SECRET_KEY,
@@ -50,12 +52,17 @@ def verify_token(token:str):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="Invalid token",headers={"WWW-Authenticate": "Bearer"})
         
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):  #fastapi dependency injects token from authorization header
+   
+   #signature,expiry check
+   #extract user id
     payload = verify_token(token)
     
     user_id:str=payload.get("sub")
     if user_id is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials")
+    
+    #doing DB search for the user because a token proves identity, but the user may have been deleted, disabled, or had roles changed. I fetch the latest user state from the database
     
     result = db.execute(select(User).where(User.id == int(user_id)))
     user = result.scalars().first()
