@@ -1,19 +1,23 @@
-from fastapi import FastAPI,Depends,HTTPException,status
+from fastapi import FastAPI,Depends,HTTPException,status,WebSocket,WebSocketDisconnect,BackgroundTasks,UploadFile, File
 from database import get_db,Base,engine
 from sqlalchemy.orm import Session
-from sqlalchemy import select,or_
+from sqlalchemy import select,or_,func
 from models.users import User
 from models.posts import Post
 from models.comments import Comment
 from models.follows import Follows
 from models.likes import Like
-from schemas.users import UserCreate,UserResponse,Token
-from schemas.posts import PostCreate,PostResponse,PostUpdate
+from schemas.users import UserCreate,UserResponse,Token,UserUpdate
+from schemas.posts import PostCreate,PostResponse,PostUpdate,PostOut
 from schemas.comments import CommentCreate,CommentResponse
-from core import security,auth
+from core import security,auth,socket_manager
 from fastapi.security import OAuth2PasswordRequestForm
+from typing import Optional
+import shutil
+import os
 
 app=FastAPI()
+manager=socket_manager.ConnectionManager()
 
 Base.metadata.create_all(bind=engine)
 
@@ -77,11 +81,17 @@ def create_post(post: PostCreate,db: Session = Depends(get_db),current_user: Use
     return new_post
 
 
-@app.get('/posts',response_model=list[PostResponse])
-def get_posts(db:Session=Depends(get_db),limit:int=10,skip:int=0):
-    result=db.execute(select(Post).limit(limit).offset(skip))
-    posts=result.scalars().all()
-    return posts
+@app.get('/posts',response_model=list[PostOut])
+def get_posts(search:Optional[str]="",db:Session=Depends(get_db),limit:int=10,skip:int=0):
+    result=db.execute(select(Post,func.count(Like.post_id).label("likes_count")).outerjoin(Like,Post.id==Like.post_id).filter(or_(Post.title.contains(search),Post.content.contains(search))).group_by(Post.id).limit(limit).offset(skip))
+    posts=result.all()
+    return [
+        {
+            "post": post,
+            "likes_count": likes_count
+        }
+        for post, likes_count in posts
+    ]
 
 @app.patch('/posts/{post_id}',response_model=PostResponse)
 def update_post(post_update:PostUpdate,post_id:int,db:Session=Depends(get_db),current_user:User=Depends(auth.get_current_user)):
@@ -159,7 +169,7 @@ def follow_toggle(target_user_id:int,db:Session=Depends(get_db),current_user:Use
     
     
 @app.post("/posts/{post_id}/like", status_code=status.HTTP_200_OK)
-def like_toggle(post_id:int,db:Session=Depends(get_db),current_user:User=Depends(auth.get_current_user)):
+def like_toggle(post_id:int,background_tasks: BackgroundTasks,db:Session=Depends(get_db),current_user:User=Depends(auth.get_current_user),):
     result=db.execute(
         select(Post).where(Post.id==post_id)
     )
@@ -181,4 +191,73 @@ def like_toggle(post_id:int,db:Session=Depends(get_db),current_user:User=Depends
     new_like = Like(user_id=current_user.id, post_id=post_id)
     db.add(new_like)
     db.commit()
+    notification_msg = f'{{"type": "like", "post_id": {post_id}, "message": "User {current_user.username} liked your post!"}}'
+    
+    background_tasks.add_task(
+        manager.send_personal_message, 
+        notification_msg, 
+        post.owner_id  # <--- We target the owner of the post!
+    )
     return {"message": "Post liked"}
+
+@app.websocket("/ws/{user_id}")
+async def websocket_endpoint(websocket: WebSocket, user_id: int):
+    
+    await manager.connect(
+        websocket,
+        user_id
+    )
+    try:
+
+        while True:
+
+            data = await websocket.receive_text()
+
+    except WebSocketDisconnect:
+
+        manager.disconnect(user_id)
+
+
+@app.patch("/users/me", response_model=UserResponse)
+def update_user(user_update: UserUpdate,db:Session=Depends(get_db), current_user:User=Depends(auth.get_current_user)):
+    
+    update_data = user_update.model_dump(exclude_unset=True)
+    
+    for field, value in update_data.items():
+     setattr(current_user, field, value)
+        
+    # 3. Save and return
+    db.commit()
+    db.refresh(current_user)
+    return current_user
+
+@app.post("/users/me/avatar", response_model=UserResponse)
+def upload_profile(file: UploadFile = File(...),db:Session=Depends(get_db), current_user:User=Depends(auth.get_current_user)):
+    os.makedirs("static/images", exist_ok=True)
+    file_location = f"static/images/user_{current_user.id}_{file.filename}"
+    with open(file_location, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        
+    current_user.profile_image_url = f"/{file_location}"
+    db.commit()
+    db.refresh(current_user)
+    return current_user
+
+@app.post("/posts/{post_id}/image", response_model=PostResponse)
+def upload_image(post_id: int, file: UploadFile = File(...), db: Session=Depends(get_db), current_user: User=Depends(auth.get_current_user)):
+    result=db.execute(
+        select(Post).where(Post.id==post_id)
+    )
+    post=result.scalars().first()
+    
+    if post.owner_id!=current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,detail="Not authorized to perform requested action")
+    
+    os.makedirs("static/post_images", exist_ok=True)
+    file_location = f"static/post_images/post_{post.id}_{file.filename}"
+    with open(file_location, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    post.image_url = f"/{file_location}"
+    db.commit()
+    db.refresh(post)
+    return post

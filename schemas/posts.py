@@ -20,6 +20,7 @@ class PostResponse(PostBase):
     id: int
     created_at:datetime
     owner_id:int
+    image_url: str | None = None
     comments:list[CommentResponse]=[]
     
 class PostOut(BaseModel):

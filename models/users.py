@@ -1,9 +1,10 @@
+from __future__ import annotations
 from sqlalchemy import Column,Integer,String,DateTime
 from sqlalchemy.orm import Mapped,mapped_column,relationship
 from database import Base
 from datetime import datetime,UTC
 from models.posts import Post
-from __future__ import annotations
+
 
 
 class User(Base):
@@ -17,6 +18,9 @@ class User(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
     )
+    bio: Mapped[str] = mapped_column(String, nullable=True)
+    github_link: Mapped[str] = mapped_column(String, nullable=True)
+    profile_image_url: Mapped[str] = mapped_column(String, nullable=True)
     posts:Mapped[list["Post"]]=relationship(back_populates="owner")
     comments: Mapped[list["Comment"]] = relationship(back_populates="owner")
     # Who is this user following?
